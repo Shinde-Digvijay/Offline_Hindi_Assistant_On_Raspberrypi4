@@ -94,8 +94,14 @@ ENGLISH_TO_HINDI_MONTH = {
     "December": "दिसंबर"
 }
 
-LED_PIN = 17  
-light_led = LED(LED_PIN)
+LED_PIN = 17
+
+try:
+    light_led = LED(LED_PIN)
+except Exception as e:
+    print("⚠ LED initialization failed:", e)
+    light_led = None
+
 
 HINDI_NUMS = {}
 REVERSE_HINDI = {}
@@ -122,17 +128,19 @@ def start_tts():
     )
 
     aplay_process = subprocess.Popen(
-        ["aplay", "-D", "default", "-r", "22050",
-        "-f", "S16_LE", "-t", "raw"],
-        stdin=piper_process.stdout
-    )
-
+    ["aplay",
+     "-D", "plughw:0,0",
+     "-r", "22050",
+     "-f", "S16_LE",
+     "-t", "raw"],
+    stdin=piper_process.stdout
+)
 def speak(text):
     global is_speaking, last_response_time, last_spoken_text
 
     print("🗣️", text)
 
-    last_spoken_text = text.lower()  
+    last_spoken_text = text.lower()
     is_speaking = True
 
     with q.mutex:
@@ -140,6 +148,8 @@ def speak(text):
 
     piper_process.stdin.write((text + "\n").encode("utf-8"))
     piper_process.stdin.flush()
+
+    time.sleep(0.2)
 
     last_response_time = time.time()
     time.sleep(COOLDOWN_TIME)
@@ -726,6 +736,13 @@ def tell_calculation(text):
     return True
 
 # MAIN COMMAND ROUTER
+def get_usb_mic_index():
+    devices = sd.query_devices()
+    for i, device in enumerate(devices):
+        if "USB" in device["name"] and device["max_input_channels"] > 0:
+            return i
+    return None
+
 
 def process_command(text):
     
@@ -927,6 +944,28 @@ def callback(indata, frames, time_info, status):
     if not is_speaking:
         q.put(bytes(indata))
 
+def start_audio_stream():
+    while True:
+        try:
+            print("🎤 Starting microphone on device 0...")
+
+            stream = sd.RawInputStream(
+                device='0',
+                samplerate=44100,
+                blocksize=4096,
+                dtype='int16',
+                channels=1,
+                callback=callback
+            )
+
+            stream.start()
+            print("🟢 Microphone started successfully")
+            return stream
+
+        except Exception as e:
+            print(f"⚠ Mic init failed: {e}")
+            time.sleep(3)
+
 # MAIN LOOP
 
 if __name__ == "__main__":
@@ -934,80 +973,75 @@ if __name__ == "__main__":
     start_tts()
     print("🟢 VEER AI READY")
 
-    with sd.RawInputStream(
-        samplerate=44100,
-        blocksize=4096,
-        dtype='int16',
-        channels=1,
-        callback=callback
-    ):
+    print("🔊 Stabilizing audio...")
+    time.sleep(5)
 
-        print("🎤 Listening...")
+    speak("वीर आपकी सहायता के लिए तैयार है")
 
-        try:
-            while True:
-                data = q.get()
+    stream = start_audio_stream()
+    print("🎤 Listening...")
 
-                if rec.AcceptWaveform(data):
+    try:
+        while True:
+            data = q.get()
 
-                    if is_speaking:
-                        continue
+            if rec.AcceptWaveform(data):
 
-                    if time.time() - last_response_time < 0.7:
-                        continue
+                if is_speaking:
+                    continue
 
-                    result = json.loads(rec.Result())
-                    text = result.get("text", "").strip().lower()
+                if time.time() - last_response_time < 0.7:
+                    continue
 
-                    if last_spoken_text and last_spoken_text in text:
-                        print("Ignored self echo")
-                        continue
+                result = json.loads(rec.Result())
+                text = result.get("text", "").strip().lower()
 
-                    if not text:
-                        continue
+                if last_spoken_text and last_spoken_text in text:
+                    print("Ignored self echo")
+                    continue
 
-                    print("🎙 Heard:", text)
+                if not text:
+                    continue
 
-                    words = text.split()
-                    if not words:
-                        continue
+                print("🎙 Heard:", text)
 
-                    if words[0] not in WAKE_WORDS:
-                        print("Wake word missing")
-                        continue
+                words = text.split()
+                if not words:
+                    continue
 
-                    command = " ".join(words[1:])
-                    command = preprocess_text(command)
-                    process_command(command)
+                if words[0] not in WAKE_WORDS:
+                    print("Wake word missing")
+                    continue
 
-        except KeyboardInterrupt:
-            print("\n🛑 VEER AI shutting down safely...")
+                command = " ".join(words[1:])
+                command = preprocess_text(command)
+                process_command(command)
 
-            # Stop song if playing
-            if song_process:
-                try:
-                    song_process.terminate()
-                except:
-                    pass
-            # Turn off LED safely
+    except KeyboardInterrupt:
+        print("\n🛑 VEER AI shutting down safely...")
+
+        if song_process:
             try:
-                light_led.off()
+                song_process.terminate()
             except:
                 pass
 
-            # Stop Piper
-            if piper_process:
-                try:
-                    piper_process.terminate()
-                except:
-                    pass
+        try:
+            light_led.off()
+        except:
+            pass
 
-            # Stop aplay
-            if aplay_process:
-                try:
-                    aplay_process.terminate()
-                except:
-                    pass
+        if piper_process:
+            try:
+                piper_process.terminate()
+            except:
+                pass
 
-            print("✅ Shutdown complete.")
-            sys.exit(0)
+        if aplay_process:
+            try:
+                aplay_process.terminate()
+            except:
+                pass
+
+        print("✅ Shutdown complete.")
+        sys.exit(0)
