@@ -118,6 +118,7 @@ except Exception as e:
 
 def start_tts():
     global piper_process, aplay_process
+
     piper_path = os.path.join(CURRENT_DIR, "piper", "piper")
     model_path = os.path.join(CURRENT_DIR, "hi_IN-pratham-medium.onnx")
 
@@ -128,13 +129,11 @@ def start_tts():
     )
 
     aplay_process = subprocess.Popen(
-    ["aplay",
-     "-D", "plughw:0,0",
-     "-r", "22050",
-     "-f", "S16_LE",
-     "-t", "raw"],
-    stdin=piper_process.stdout
-)
+        ["aplay", "-D", "plug:dmix", "-r", "22050",
+         "-f", "S16_LE", "-t", "raw"],
+        stdin=piper_process.stdout
+    )
+
 def speak(text):
     global is_speaking, last_response_time, last_spoken_text
 
@@ -236,10 +235,10 @@ def play_random_song():
     speak("गाना चला रहा हूँ")
 
     song_process = subprocess.Popen(
-        ["mpg123", song_path],
+        ["aplay", "-D", "plug:dmix", song_path],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
-    )
+)
 
 def stop_song():
     global song_process, is_song_playing, is_song_paused
@@ -271,17 +270,58 @@ def resume_song():
         speak("गाना फिर से चालू किया")
 
 def play_next_song():
-    if song_list:
-        global current_song_index
-        current_song_index = (current_song_index + 1) % len(song_list)
-        play_random_song()
+    global current_song_index, song_process, song_list
+
+    if not song_list:
+        speak("कोई गाना नहीं मिला")
+        return
+
+    # Move to next song
+    current_song_index = (current_song_index + 1) % len(song_list)
+
+    song_path = os.path.join(SONG_FOLDER, song_list[current_song_index])
+    print(f"🎵 Playing next: {song_list[current_song_index]}")
+
+    # Stop current song if running
+    if song_process:
+        try:
+            song_process.terminate()
+        except:
+            pass
+
+    # Start next song
+    song_process = subprocess.Popen(
+        ["aplay", "-D", "plug:dmix", song_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
 def play_previous_song():
-    if song_list:
-        global current_song_index
-        current_song_index = (current_song_index - 1) % len(song_list)
-        play_random_song()
+    global current_song_index, song_process, song_list
 
+    if not song_list:
+        speak("कोई गाना नहीं मिला")
+        return
+
+    # Move to previous song
+    current_song_index = (current_song_index - 1) % len(song_list)
+
+    song_path = os.path.join(SONG_FOLDER, song_list[current_song_index])
+    print(f"🎵 Playing previous: {song_list[current_song_index]}")
+
+    # Stop current song if running
+    if song_process:
+        try:
+            song_process.terminate()
+        except:
+            pass
+
+    # Start previous song
+    song_process = subprocess.Popen(
+        ["aplay", "-D", "plug:dmix", song_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 # NUMBER EXTRACTION (HINDI + DIGIT)
 
 def extract_number_from_text(text):
@@ -460,6 +500,17 @@ def start_alarm(hour, minute):
 
         if alarm_active:
             speak("अलार्म बज रहा है")
+
+            alarm_path = os.path.join(CURRENT_DIR, "alarm.wav")
+
+            alarm_process = subprocess.Popen(
+                ["mpg123", alarm_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            # ✅ Reset alarm state so new alarm can be set
+            alarm_active = False
 
             alarm_path = os.path.join(CURRENT_DIR, "alarm.mp3")
 
@@ -944,13 +995,28 @@ def callback(indata, frames, time_info, status):
     if not is_speaking:
         q.put(bytes(indata))
 
+def get_input_device():
+    devices = sd.query_devices()    
+    for i, d in enumerate(devices):
+        if d['max_input_channels'] > 0:
+            print(f"🎤 Found input device: {d['name']} (index {i})")
+            return i
+    return None
+
 def start_audio_stream():
     while True:
         try:
-            print("🎤 Starting microphone on device 0...")
+            device_index = get_input_device()
+
+            if device_index is None:
+                print("⚠ No input device found, retrying...")
+                time.sleep(3)
+                continue
+
+            print(f"🎤 Starting microphone on device {device_index}...")
 
             stream = sd.RawInputStream(
-                device='0',
+                device=device_index,
                 samplerate=44100,
                 blocksize=4096,
                 dtype='int16',
@@ -987,14 +1053,19 @@ if __name__ == "__main__":
 
             if rec.AcceptWaveform(data):
 
+                result = json.loads(rec.Result())
+                text = result.get("text", "").strip().lower()
+
+                if not text:
+                    continue
+
+                print("🎙 Heard:", text)
+
                 if is_speaking:
                     continue
 
                 if time.time() - last_response_time < 0.7:
                     continue
-
-                result = json.loads(rec.Result())
-                text = result.get("text", "").strip().lower()
 
                 if last_spoken_text and last_spoken_text in text:
                     print("Ignored self echo")
